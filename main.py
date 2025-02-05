@@ -55,7 +55,7 @@ while True:
             print("请输入有效的指令！")
             continue
 
-        # 构建 Prompt
+        # 构建 Promp
         prompt = build_prompt(instruction=inst)
 
         start_time = time.time()

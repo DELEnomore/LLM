@@ -58,7 +58,6 @@ while True:
         # 构建 Prompt
         prompt = build_prompt(instruction=inst)
 
-        # 生成参数（关键优化点）
         start_time = time.time()
         outputs = text_generator(
             prompt,

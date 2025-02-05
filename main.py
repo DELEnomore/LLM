@@ -4,18 +4,18 @@ import time
 import transformers
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
-os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
-cache_dir = os.path.dirname(os.path.abspath(__file__))
-os.environ['TRANSFORMERS_CACHE'] = cache_dir
 
-model_path = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
-tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=model_path, cache_dir=cache_dir)
+from configs import MODEL_NAME, CACHE_DIR
+
+
+
+tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=MODEL_NAME, cache_dir=CACHE_DIR)
 tokenizer.pad_token = tokenizer.eos_token
 model = AutoModelForCausalLM.from_pretrained(
-    model_path,
+    MODEL_NAME,
     torch_dtype=torch.float16,  # Use float16 for faster performance on compatible GPUs
     device_map="auto",
-    cache_dir=cache_dir
+    cache_dir=CACHE_DIR
 )
 
 # Initialize pipeline with GPU
@@ -30,7 +30,6 @@ text_generator = transformers.pipeline(
 
 
 def build_prompt(instruction, input_text=None) -> str:
-    """构建与微调时一致的 Prompt 模板"""
     if input_text and input_text.strip():
         return f"### Instruction:\n{instruction}\n\n### Input:\n{input_text}\n\n### Response:\n"
     else:
@@ -72,7 +71,6 @@ while True:
         )
         generation_time = time.time() - start_time
 
-        # 提取并打印响应
         generated_text = outputs[0]["generated_text"]
         response = extract_response(generated_text)
         print(f"\nModel: {response}")

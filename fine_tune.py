@@ -1,3 +1,6 @@
+import os.path
+import time
+
 import pandas as pd
 import pyarrow.parquet as pq
 import torch
@@ -6,18 +9,14 @@ from peft import LoraConfig, get_peft_model
 from transformers import LlamaForCausalLM, LlamaTokenizer, Trainer, TrainingArguments, AutoModelForCausalLM, \
     AutoTokenizer
 
+from configs import MODEL_NAME
+from dataset.ace_math_dataset import AceMathDataset
 
-def main():
-    # Load the model path
-    model_path = "D:\\Code\\LLM\\Llama-3.2-3B-Instruct"
-    # Load the tokenizer and model with GPU support
-    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=model_path)
 
-    tokenizer.pad_token = tokenizer.eos_token
+def fine_tune():
     # 检查并添加填充标记
-
     model = AutoModelForCausalLM.from_pretrained(
-        model_path,
+        MODEL_NAME,
         load_in_4bit=True,  # 4-bit 模式
         torch_dtype=torch.float16,  # 混合精度
         device_map="auto",  # 自动分配到 GPU
@@ -36,60 +35,21 @@ def main():
     peft_model = get_peft_model(model, lora_config)
     peft_model.print_trainable_parameters()  # 查看可训练参数量
 
-    dataset = load_dataset("hfl/ruozhiba_gpt4")
+    dataset_instance = AceMathDataset()
+    data = dataset_instance.get_data()
     # 1. 拆分训练集和验证集
-    split_dataset = dataset["train"].train_test_split(
+    split_data = data["train"].train_test_split(
         test_size=0.1,
         seed=42
     )
-    train_data = split_dataset["train"]
-    valid_data = split_dataset["test"]
+    train_data = split_data["train"]
+    valid_data = split_data["test"]
 
-
-    def tokenize_function(examples, max_length=512):
-        # 1. 构建模型输入（Prompt）
-        prompts = []
-        for inst, inp in zip(examples['instruction'], examples['input']):
-            if inp.strip():  # 如果input不为空
-                prompt = f"### Instruction:\n{inst}\n\n### Input:\n{inp}\n\n### Response:\n"
-            else:  # 如果input为空
-                prompt = f"### Instruction:\n{inst}\n\n### Response:\n"
-            prompts.append(prompt)
-
-        # 2. 构建标签（仅包含output部分）
-        responses = examples['output']
-
-        # 3. 对prompt和response分别分词
-        model_inputs = tokenizer(
-            prompts,
-            max_length=max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt"  # 根据训练框架调整（如Trainer可省略）
-        )
-
-        # 4. 对response分词并设置为labels
-        labels = tokenizer(
-            responses,
-            max_length=max_length,
-            truncation=True,
-            padding="max_length",
-            return_tensors="pt"  # 根据训练框架调整
-        )["input_ids"]
-
-        # 5. 处理填充token的损失掩码
-        # 将padding部分的label标记为-100（损失函数自动忽略）
-        labels[labels == tokenizer.pad_token_id] = -100
-
-        # 6. 将labels添加到输入字典
-        model_inputs["labels"] = labels
-        return model_inputs
-
-    train_tokenized = train_data.map(tokenize_function, batched=True)
-    valid_tokenized = valid_data.map(tokenize_function, batched=True)
+    train_tokenized = train_data.map(dataset_instance.tokenize_function, batched=True)
+    valid_tokenized = valid_data.map(dataset_instance.tokenize_function, batched=True)
 
     training_args = TrainingArguments(
-        output_dir="./lora-llama-ckpt",
+        output_dir=MODEL_OUTPUT_DIR,
         per_device_train_batch_size=2,
         per_device_eval_batch_size=2,
         gradient_accumulation_steps=8,
@@ -116,7 +76,74 @@ def main():
     trainer.save_model()
     pass
 
+def run_fine_tuned_model():
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_NAME,
+        torch_dtype=torch.float16,  # Use float16 for faster performance on compatible GPUs
+        device_map="auto",
+    )
+    # Initialize pipeline with GPU
+    text_generator = transformers.pipeline(
+        task="text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        truncation=True,  # 必须启用截断
+        padding="max_length",  # 与训练时一致
+        max_length=512,  # 必须与训练时 max_length 一致
+    )
+
+    def extract_response(full_text: str) -> str:
+        """从生成的完整文本中提取 Response 部分"""
+        response_start = full_text.find("### Response:\n")
+        if response_start == -1:
+            return "[ERROR] Response separator not found."
+        response = full_text[response_start + len("### Response:\n"):].strip()
+        # 安全截断：防止模型重复生成模板
+        return response.split("### Instruction:")[0].split("### Response:")[0].strip()
+
+    # 3. 交互式推理循环
+    while True:
+        try:
+            # 用户输入
+            inst = input("\nUser: ").strip()
+            if not inst:
+                print("请输入有效的指令！")
+                continue
+
+            # 构建 Promp
+            prompt = build_prompt(instruction=inst)
+
+            start_time = time.time()
+            outputs = text_generator(
+                prompt,
+                do_sample=True,
+                top_p=0.9,  # 平衡多样性与质量
+                temperature=0.7,  # 降低随机性
+                max_new_tokens=256,  # 控制生成长度（不是总长度！）
+                eos_token_id=tokenizer.eos_token_id,
+                pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+            )
+            generation_time = time.time() - start_time
+
+            generated_text = outputs[0]["generated_text"]
+            response = extract_response(generated_text)
+            print(f"\nModel: {response}")
+            print(f"[生成耗时: {generation_time:.2f}s]")
+
+        except KeyboardInterrupt:
+            print("\n退出交互。")
+            break
+
+
+def main():
+
+    fine_tune()
+    run_fine_tuned_model()
+
 
 # 微调模型
 if __name__ == "__main__":
+    tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name_or_path=MODEL_NAME)
+    tokenizer.pad_token = tokenizer.eos_token
+    MODEL_OUTPUT_DIR = os.path.join(os.environ['TRANSFORMERS_CACHE'], MODEL_NAME + '-finetuned')
     main()
